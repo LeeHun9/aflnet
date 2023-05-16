@@ -72,6 +72,8 @@
 #include <graphviz/gvc.h>
 #include <math.h>
 
+#include "bandit.h"
+
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined (__OpenBSD__)
 #  include <sys/sysctl.h>
 #endif /* __APPLE__ || __FreeBSD__ || __OpenBSD__ */
@@ -357,6 +359,12 @@ static inline u8 has_new_bits(u8* virgin_map);
 static u8* stats_log_path = NULL;
 FILE* fp_stats = NULL;
 s32 pre_time = 0;
+
+/* leehung bandit havoc */
+static u8 log_info[LOG_INFO_LEN];
+static Bandit* stack_bandit;
+static Bandit* mutator_bandit[HAVOC_STACK_POW2];
+static char *bandit_log_path = NULL;
 
 u32 server_wait_usecs = 10000;
 u32 poll_wait_msecs = 1;
@@ -1127,6 +1135,41 @@ HANDLE_RESPONSES:
 
   return 0;
 }
+
+static void init_bandit() {
+
+  stack_bandit = initial_bandit(HAVOC_STACK_POW2);
+
+  u32 i;
+
+  for (i = 0; i < HAVOC_STACK_POW2; i++) {
+
+    mutator_bandit[i] = initial_bandit(MUTATOR_BANDIT_LEN);
+  }
+
+}
+
+static int debug_log(char* log_info){
+    FILE *fp = fopen(bandit_log_path, "a+");
+
+    fprintf(fp, "[DEBUG]: %s\n", log_info);
+
+    fclose(fp);
+    return 0;
+}
+
+static int bandit_log(Bandit* bandit) {
+  sprintf(log_info, "bandit values");
+
+  u32 i;
+  for (i =0; i < bandit->length; i++) {
+    sprintf(log_info, "%s, %.10f", log_info, bandit->ucb_values[i]);
+  }
+
+  debug_log(log_info);
+  return 0;
+}
+
 /* End of AFLNet-specific variables & functions */
 
 /* Get unix time in milliseconds */
@@ -7034,13 +7077,22 @@ havoc_stage:
 
   for (stage_cur = 0; stage_cur < stage_max; stage_cur++) {
 
-    u32 use_stacking = 1 << (1 + UR(HAVOC_STACK_POW2));
+    // u32 use_stacking = 1 << (1 + UR(HAVOC_STACK_POW2));
+
+    u32 stack_num    = select_maximum_arms(stack_bandit);
+    u32 mutator_arm  = select_maximum_arms(mutator_bandit[stack_num]);
+
+    u32 use_stacking = 1 << (1 + stack_num);
 
     stage_cur_val = use_stacking;
 
     for (i = 0; i < use_stacking; i++) {
 
-      switch (UR(15 + 2 + (region_level_mutation ? 4 : 0))) {
+      //switch (UR(15 + 2 + (region_level_mutation ? 4 : 0))) {
+      if (!mutator_arm) {
+
+      /* Unit mutator */
+      switch (UR(11 + (region_level_mutation ? 4 : 0))) {
 
         case 0:
 
@@ -7214,6 +7266,87 @@ havoc_stage:
 
           out_buf[UR(temp_len)] ^= 1 + UR(255);
           break;
+
+        case 11: {
+            u32 src_region_len = 0;
+            u8* new_buf = choose_source_region(&src_region_len);
+            if (new_buf == NULL) break;
+
+            //replace the current region
+            ck_free(out_buf);
+            out_buf = new_buf;
+            temp_len = src_region_len;
+            break;
+          }
+
+        /* Insert a random region from a random seed to the beginning of the current region */
+        case 12: {
+            u32 src_region_len = 0;
+            u8* src_region = choose_source_region(&src_region_len);
+            if (src_region == NULL) break;
+
+            if (temp_len + src_region_len >= MAX_FILE) {
+              ck_free(src_region);
+              break;
+            }
+
+            u8* new_buf = ck_alloc_nozero(temp_len + src_region_len);
+
+            memcpy(new_buf, src_region, src_region_len);
+
+            memcpy(&new_buf[src_region_len], out_buf, temp_len);
+
+            ck_free(out_buf);
+            ck_free(src_region);
+            out_buf = new_buf;
+            temp_len += src_region_len;
+            break;
+          }
+
+        /* Insert a random region from a random seed to the end of the current region */
+        case 13: {
+            u32 src_region_len = 0;
+            u8* src_region = choose_source_region(&src_region_len);
+            if (src_region == NULL) break;
+
+            if (temp_len + src_region_len >= MAX_FILE) {
+              ck_free(src_region);
+              break;
+            }
+
+            u8* new_buf = ck_alloc_nozero(temp_len + src_region_len);
+
+            memcpy(new_buf, out_buf, temp_len);
+
+            memcpy(&new_buf[temp_len], src_region, src_region_len);
+
+            ck_free(out_buf);
+            ck_free(src_region);
+            out_buf = new_buf;
+            temp_len += src_region_len;
+            break;
+          }
+
+        /* Duplicate the current region */
+        case 14: {
+            if (temp_len * 2 >= MAX_FILE) break;
+
+            u8* new_buf = ck_alloc_nozero(temp_len * 2);
+
+            memcpy(new_buf, out_buf, temp_len);
+
+            memcpy(&new_buf[temp_len], out_buf, temp_len);
+
+            ck_free(out_buf);
+            out_buf = new_buf;
+            temp_len += temp_len;
+            break;
+          }
+        }
+      } 
+      else {
+      /* Chunk mutator */
+      switch(11 + UR(6 +  (region_level_mutation ? 4 : 0))) {
 
         case 11 ... 12: {
 
@@ -7487,8 +7620,9 @@ havoc_stage:
             temp_len += temp_len;
             break;
           }
-
       }
+
+    }
 
     }
 
@@ -7505,7 +7639,11 @@ havoc_stage:
     /* If we're finding new stuff, let's run for a bit longer, limits
        permitting. */
 
+    u32 reward = 0;
+
     if (queued_paths != havoc_queued) {
+      /* Insteresting */
+      reward = 1;
 
       if (perf_score <= HAVOC_MAX_MULT * 100) {
         stage_max  *= 2;
@@ -7515,6 +7653,10 @@ havoc_stage:
       havoc_queued = queued_paths;
 
     }
+
+    update_arms(stack_num,  reward, stack_bandit);
+
+    update_arms(mutator_arm,reward, mutator_bandit[stack_num]);
 
   }
 
@@ -9143,6 +9285,14 @@ int main(int argc, char** argv) {
 
     }
 
+  char* Bandit_Debug = getenv("BANDIT_DEBUG");
+  if (Bandit_Debug != NULL && atoi(Bandit_Debug) == 1)
+    if (!bandit_log_path) {
+      bandit_log_path = (char *) malloc(strlen(out_dir) + strlen("/bandit-info.log") + 10);
+      sprintf(bandit_log_path, "%s%s", out_dir, "/bandit-info.log");
+    }
+
+
   if (optind == argc || !in_dir || !out_dir) usage(argv[0]);
 
   //AFLNet - Check for required arguments
@@ -9257,6 +9407,8 @@ int main(int argc, char** argv) {
 
   write_stats_file(0, 0, 0);
   save_auto();
+
+  init_bandit();
 
   if (stop_soon) goto stop_fuzzing;
 
