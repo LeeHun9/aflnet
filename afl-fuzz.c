@@ -988,7 +988,7 @@ void update_state_aware_variables(struct queue_entry *q, u8 dry_run)
   if (!dry_run) {
     k = kh_get(hms, khms_states, target_state_id);
     if (k != kh_end(khms_states)) {
-      kh_val(khms_states, k)->paths_discovered++;
+      kh_val(khms_states, k)->paths_discovered++; 
     }
   }
 
