@@ -151,6 +151,8 @@ static s32 forksrv_pid,               /* PID of the fork server           */
            out_dir_fd = -1;           /* FD of the lock file              */
 
 EXP_ST u8* trace_bits;                /* SHM with instrumentation bitmap  */
+EXP_ST u8* trans_bits;               /* Record for current state transtion       */
+EXP_ST u8* virgin_trans_bits[TRANS_MAP_SIZE];        /* Record yet untouched trans by fuzzing    */
 
 EXP_ST u8  virgin_bits[MAP_SIZE],     /* Regions yet untouched by fuzzing */
            virgin_tmout[MAP_SIZE],    /* Bits we haven't seen in tmouts   */
@@ -231,6 +233,10 @@ static u64 total_bitmap_size,         /* Total bit count for all bitmaps  */
            total_bitmap_entries;      /* Number of bitmaps counted        */
 
 static s32 cpu_core_count;            /* CPU core count                   */
+
+/* leehung added: for show_stat*/
+static u32 total_trans_edge = 0;
+static u32 unique_trans_edge = 0;
 
 #ifdef HAVE_AFFINITY
 
@@ -416,6 +422,12 @@ kliter_t(lms) *M2_prev, *M2_next;
 //Function pointers pointing to Protocol-specific functions
 unsigned int* (*extract_response_codes)(unsigned char* buf, unsigned int buf_size, unsigned int* state_count_ref) = NULL;
 region_t* (*extract_requests)(unsigned char* buf, unsigned int buf_size, unsigned int* region_count_ref) = NULL;
+
+// leehung functions
+//void DEBUG (char const *fmt, ...);
+static u8 has_new_trans(u8* virgin_trans_map, int* uniq_trans_num, int* trans_num);
+static void record_transbit(unsigned int *state_sequence, unsigned int state_count);
+
 
 /* Initialize the implemented state machine as a graphviz graph */
 void setup_ipsm()
@@ -1129,6 +1141,33 @@ HANDLE_RESPONSES:
 }
 /* End of AFLNet-specific variables & functions */
 
+// This function use trans_bits to record state transition by retrieving the state sequence extracted 
+
+void record_transbit(unsigned int *state_sequence, unsigned int state_count) {
+
+  // Initialize trans_bits to 0
+  memset(trans_bits, 0, TRANS_MAP_SIZE);
+
+  unsigned int pre_state_id = 0;
+  unsigned int state_id = 0;
+  unsigned int next_state_id = 0;
+
+  // state_sequence[0] always be 0, state_count=1 represent no trans, we do nothing
+  if (state_count == 1) {
+    //trans_bits[pre_state_id + state_sequence[0]]++;
+    return;
+  }
+    
+  int i;
+  
+  /* update trans_bits */
+  for (i = 1; i < state_count; i++) {
+    trans_bits[pre_state_id + state_sequence[i]]++; // current state is state_sequence[i]
+    pre_state_id = state_sequence[i] * 8;   // this should be optimized later
+  }
+
+}
+
 /* Get unix time in milliseconds */
 
 static u64 get_cur_time(void) {
@@ -1722,6 +1761,36 @@ EXP_ST void read_bitmap(u8* fname) {
 
 }
 
+static u8 has_new_trans(u8* virgin_trans_map, int* uniq_trans_num, int* trans_num) {
+
+  int ret = 0;
+  int tmp = 0;
+  int tmp2 = 0;
+
+  for (int i = 0; i < TRANS_MAP_SIZE; i++) {
+    if (unlikely(trans_bits[i])) {
+      tmp++;
+      tmp2 += trans_bits[i];
+
+      if (!virgin_trans_map[i]) {
+        virgin_trans_map[i] = trans_bits[i];
+        unique_trans_edge++;
+        ret = 2;
+      }
+
+      //if (virgin_trans_map[i] && virgin_trans_bits[i] < trans_bits[i]) {
+      //  virgin_trans_map[i] = trans_bits[i];
+      //  ret = 1;
+      //}
+
+      total_trans_edge += trans_bits[i];
+    }
+  }
+  *uniq_trans_num = tmp;
+  *trans_num = tmp2;
+
+  return ret;
+}
 
 /* Check if the current execution path brings anything new to the table.
    Update virgin bits to reflect the finds. Returns 1 if the only change is
@@ -2208,6 +2277,9 @@ EXP_ST void setup_shm(void) {
   u8* shm_str;
 
   if (!in_bitmap) memset(virgin_bits, 255, MAP_SIZE);
+
+  memset(virgin_trans_bits, 0, TRANS_MAP_SIZE);
+  trans_bits = ck_alloc(TRANS_MAP_SIZE);
 
   memset(virgin_tmout, 255, MAP_SIZE);
   memset(virgin_crash, 255, MAP_SIZE);
@@ -3614,6 +3686,19 @@ static void perform_dry_run(char** argv) {
 
         if (crash_mode) FATAL("Test case '%s' does *NOT* crash", fn);
 
+        unsigned int state_count;
+        u8 hnt = 0;
+        u32 uts = 0;
+        u32 ts = 0;
+
+        if (!response_buf_size || !response_bytes) break;
+        
+        unsigned int *state_sequence = (*extract_response_codes)(response_buf, response_buf_size, &state_count);
+        record_transbit(state_sequence, state_count);
+        hnt = has_new_trans(virgin_trans_bits, &uts, &ts);
+
+        if (state_sequence) ck_free(state_sequence);
+
         break;
 
       case FAULT_TMOUT:
@@ -3995,6 +4080,9 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
   u8  *fn = "";
   u8  hnb;
+  u8  hnt = 0;
+  u32 ts = 0;
+  u32 uts = 0;
   //s32 fd;
   u8  keeping = 0, res;
 
@@ -4002,6 +4090,16 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
     /* Keep only if there are new bits in the map, add to queue for
        future fuzzing, etc. */
+    
+    unsigned int state_count;
+      
+    if (response_buf_size && response_bytes) {
+      unsigned int *state_sequence = (*extract_response_codes)(response_buf, response_buf_size, &state_count);
+      record_transbit(state_sequence, state_count);
+      hnt = has_new_trans(virgin_trans_bits, &uts, &ts);
+      //Free state sequence
+      if (state_sequence) ck_free(state_sequence);
+    }
 
     if (!(hnb = has_new_bits(virgin_bits))) {
       if (crash_mode) total_crashes++;
@@ -5237,13 +5335,13 @@ static void show_stats(void) {
 
     if (cpu_aff >= 0) {
 
-      SAYF(SP10 cGRA "[cpu%03u:%s%3u%%" cGRA "]\r" cRST,
+      SAYF(SP10 cGRA "[cpu%03u:%s%3u%%" cGRA "]\n" cRST,
            MIN(cpu_aff, 999), cpu_color,
            MIN(cur_utilization, 999));
 
     } else {
 
-      SAYF(SP10 cGRA "   [cpu:%s%3u%%" cGRA "]\r" cRST,
+      SAYF(SP10 cGRA "   [cpu:%s%3u%%" cGRA "]\n" cRST,
            cpu_color, MIN(cur_utilization, 999));
 
    }
@@ -5255,7 +5353,10 @@ static void show_stats(void) {
 
 #endif /* ^HAVE_AFFINITY */
 
-  } else SAYF("\r");
+  } else SAYF("\n");
+
+  SAYF("total num of transition is : %d\n", total_trans_edge);
+  SAYF("unique num of transition is : %d\n", unique_trans_edge);
 
   /*leehung: Record stats to file each 3 seconds*/
   const int period = 3;
