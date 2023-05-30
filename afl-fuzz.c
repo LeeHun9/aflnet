@@ -5364,7 +5364,7 @@ static void show_stats(void) {
   u64 _delta = cur_ms - start_time;
   s32 _second = (_delta / 1000) % 60;
   if (_second % period == 0 && pre_time != _second) {
-    fprintf(fp_stats, "%llu,%-21s,%-5s,%0.02f%%,%s\n", cur_ms - start_time, DI(total_execs), DI(queued_paths), t_byte_ratio,DI(unique_crashes));
+    fprintf(fp_stats, "%llu,%-21s,%-5s,%0.02f%%,%s,%s\n", cur_ms - start_time, DI(total_execs), DI(queued_paths), t_byte_ratio,DI(unique_crashes),DI(unique_trans_edge));
     pre_time = _second;
     rec = 1;
   }
@@ -9327,7 +9327,7 @@ int main(int argc, char** argv) {
     FATAL("Failed to open stats_record.csv");
   }
   // write head to csv
-  fprintf(fp_stats, "run time,total execs,total paths,map density,unique crashes\n");
+  fprintf(fp_stats, "run time,total execs,total paths,map density,unique crashes, unique_trans_edge\n");
 
   pivot_inputs();
 
