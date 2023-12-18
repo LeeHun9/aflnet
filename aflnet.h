@@ -32,6 +32,9 @@ typedef struct {
   u32 selected_seed_index;    /* the recently selected seed index */
   void **seeds;               /* keeps all seeds reaching this state -- can be casted to struct queue_entry* */
   u32 seeds_count;            /* total number of seeds, it must be equal the size of the seeds array */
+  u32 depth_acount;           /* total depth of this state in all sequence */
+  u32 avg_depth;              /* Average depth of this state*/
+  u32 touchs;                 /* Average depth of this state*/
 } state_info_t;
 
 enum {

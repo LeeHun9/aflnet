@@ -427,7 +427,7 @@ region_t* (*extract_requests)(unsigned char* buf, unsigned int buf_size, unsigne
 //void DEBUG (char const *fmt, ...);
 static u8 has_new_trans(u8* virgin_trans_map, int* uniq_trans_num, int* trans_num);
 static void record_transbit(unsigned int *state_sequence, unsigned int state_count);
-
+static void record_depth(unsigned int *state_sequence, unsigned int state_count);
 
 /* Initialize the implemented state machine as a graphviz graph */
 void setup_ipsm()
@@ -596,13 +596,24 @@ void update_fuzzs() {
     unsigned int state_id = state_sequence[i];
 
     if (kh_get(hs32, khs_state_ids, state_id) != kh_end(khs_state_ids)) {
-      continue;
+      k = kh_get(hms, khms_states, state_id);
+      if (k != kh_end(khms_states)) {
+        kh_val(khms_states, k)->touchs++;
+        kh_val(khms_states, k)->depth_acount+=i;
+      }
+      //continue;
     } else {
       kh_put(hs32, khs_state_ids, state_id, &discard);
       k = kh_get(hms, khms_states, state_id);
       if (k != kh_end(khms_states)) {
         kh_val(khms_states, k)->fuzzs++;
+        kh_val(khms_states, k)->touchs++;
+        kh_val(khms_states, k)->depth_acount+=i;
       }
+    }
+    if (k != kh_end(khms_states)) {
+      kh_val(khms_states, k)->avg_depth = kh_val(khms_states, k)->depth_acount / kh_val(khms_states, k)->touchs;
+      //u8* state_log_file = alloc_printf("%s/state_info.csv", out_dir);
     }
   }
   ck_free(state_sequence);
@@ -829,6 +840,9 @@ void update_state_aware_variables(struct queue_entry *q, u8 dry_run)
           newState_From->selected_seed_index = 0;
           newState_From->seeds = NULL;
           newState_From->seeds_count = 0;
+          newState_From->touchs = 0;
+          newState_From->avg_depth = 0;
+          newState_From->depth_acount = 0;
 
           k = kh_put(hms, khms_states, prevStateID, &discard);
           kh_value(khms_states, k) = newState_From;
@@ -859,6 +873,9 @@ void update_state_aware_variables(struct queue_entry *q, u8 dry_run)
           newState_To->selected_seed_index = 0;
           newState_To->seeds = NULL;
           newState_To->seeds_count = 0;
+          newState_To->touchs = 0;
+          newState_To->avg_depth = 0;
+          newState_To->depth_acount = 0;
 
           k = kh_put(hms, khms_states, curStateID, &discard);
           kh_value(khms_states, k) = newState_To;
@@ -1144,6 +1161,33 @@ HANDLE_RESPONSES:
 // This function use trans_bits to record state transition by retrieving the state sequence extracted 
 
 void record_transbit(unsigned int *state_sequence, unsigned int state_count) {
+
+  // Initialize trans_bits to 0
+  memset(trans_bits, 0, TRANS_MAP_SIZE);
+
+  unsigned int pre_state_id = 0;
+  unsigned int state_id = 0;
+  unsigned int next_state_id = 0;
+
+  // state_sequence[0] always be 0, state_count=1 represent no trans, we do nothing
+  if (state_count == 1) {
+    //trans_bits[pre_state_id + state_sequence[0]]++;
+    return;
+  }
+    
+  int i;
+  
+  /* update trans_bits */
+  for (i = 1; i < state_count; i++) {
+    trans_bits[(pre_state_id + state_sequence[i])%TRANS_MAP_SIZE]++; // current state is state_sequence[i]
+    pre_state_id = state_sequence[i] * 8;   // this should be optimized later
+  }
+
+}
+
+// This function use trans_bits to record state transition by retrieving the state sequence extracted 
+
+void record_depth(unsigned int *state_sequence, unsigned int state_count) {
 
   // Initialize trans_bits to 0
   memset(trans_bits, 0, TRANS_MAP_SIZE);
@@ -4096,6 +4140,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
     if (response_buf_size && response_bytes) {
       unsigned int *state_sequence = (*extract_response_codes)(response_buf, response_buf_size, &state_count);
       record_transbit(state_sequence, state_count);
+      //record_depth(state_sequence, state_count);
       hnt = has_new_trans(virgin_trans_bits, &uts, &ts);
       //Free state sequence
       if (state_sequence) ck_free(state_sequence);
@@ -5372,7 +5417,7 @@ static void show_stats(void) {
   /* Show debugging stats for AFLNet only when AFLNET_DEBUG environment variable is set */
   if (getenv("AFLNET_DEBUG") && (atoi(getenv("AFLNET_DEBUG")) == 1) && state_aware_mode) {
     SAYF(cRST "\n\nMax_seed_region_count: %-4s, current_kl_messages_size: %-4s\n\n", DI(max_seed_region_count), DI(kl_messages->size));
-    SAYF(cRST "State IDs and its #selected_times,"cCYA  "#fuzzs,"cLRD "#discovered_paths,"cGRA "#excersing_paths:\n");
+    SAYF(cRST "State IDs and its #depth,"cCYA  "#fuzzs,"cLRD "#discovered_paths,"cGRA "#excersing_paths:\n");
 
     khint_t k;
     state_info_t *state;
@@ -5384,7 +5429,7 @@ static void show_stats(void) {
       k = kh_get(hms, khms_states, state_id);
       if (k != kh_end(khms_states)) {
         state = kh_val(khms_states, k);
-        SAYF(cRST "S%-3s:%-4s,"cCYA "%-5s,"cLRD "%-5s,"cGRA "%-5s",  DI(state->id), DI(state->selected_times), DI(state->fuzzs), DI(state->paths_discovered), DI(state->paths));
+        SAYF(cRST "S%-3s:%-4s,"cCYA "%-5s,"cLRD "%-5s,"cGRA "%-5s",  DI(state->id), DI(state->avg_depth), DI(state->fuzzs), DI(state->paths_discovered), DI(state->paths));
         if ((i + 1) % 3 == 0) SAYF("\n");
       }
     }
